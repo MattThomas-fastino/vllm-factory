@@ -125,18 +125,24 @@ class GLiNER25BoundaryPooler(nn.Module):
 
     def _decode_host(self, core: dict[str, Any]) -> Any:
         engine = _require("gliner2.models.boundary.engine", "GLiNER25 decode host")
+        # ``object.__new__`` skips ``nn.Module.__init__``, so attribute
+        # assignment must not go through ``Module.__setattr__`` (it raises
+        # ``cannot assign module before Module.__init__() call``).
         host = object.__new__(engine.BoundaryExtractor)
-        host.boundary_head = self.boundary_head
-        host.boundary_settings = self.boundary_settings
-        host.classifier = self.classifier
-        host.enable_records = self.enable_records
-        host.enable_relations = self.enable_relations
-        host.record_decoder = getattr(self, "record_decoder", None)
-        host.relation_scorer = getattr(self, "relation_scorer", None)
-        host.relation_pair_generator = getattr(self, "relation_pair_generator", None)
-        host.hidden_size = self.hidden_size
-        host.strict_extraction = True
-        host._encode_core = lambda _batch: core
+        for name, value in (
+            ("boundary_head", self.boundary_head),
+            ("boundary_settings", self.boundary_settings),
+            ("classifier", self.classifier),
+            ("enable_records", self.enable_records),
+            ("enable_relations", self.enable_relations),
+            ("record_decoder", getattr(self, "record_decoder", None)),
+            ("relation_scorer", getattr(self, "relation_scorer", None)),
+            ("relation_pair_generator", getattr(self, "relation_pair_generator", None)),
+            ("hidden_size", self.hidden_size),
+            ("strict_extraction", True),
+            ("_encode_core", lambda _batch: core),
+        ):
+            object.__setattr__(host, name, value)
         return host
 
     def _core_from_hidden(

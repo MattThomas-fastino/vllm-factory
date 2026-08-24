@@ -66,3 +66,13 @@ def test_boundary_pooler_constructs_and_exposes_checkpoint_prefixes():
     if pooler.enable_relations:
         assert any(k.startswith("relation_scorer.") for k in keys)
     assert pooler.get_tasks() == {"embed", "classify", "plugin"}
+
+
+def test_decode_host_borrows_modules_without_module_init() -> None:
+    """Warmup used to crash: assigning nn.Modules onto object.__new__ host."""
+    pooler = GLiNER25BoundaryPooler(hidden_size=32, boundary_head={"dropout": 0.0})
+    host = pooler._decode_host({"text_states": None})
+    assert host.boundary_head is pooler.boundary_head
+    assert host.classifier is pooler.classifier
+    assert host.strict_extraction is True
+    assert host._encode_core({})["text_states"] is None
