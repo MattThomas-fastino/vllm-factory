@@ -60,9 +60,7 @@ class DeBERTaGLiNER25IOProcessor(FactoryIOProcessor):
         if not stripped:
             return None
         if not _ADAPTER_NAME_RE.match(stripped):
-            raise ValueError(
-                f"'adapter' must match ^[A-Za-z0-9_.\\-:/]{{1,128}}$ — got {value!r}"
-            )
+            raise ValueError(f"'adapter' must match ^[A-Za-z0-9_.\\-:/]{{1,128}}$ — got {value!r}")
         return stripped
 
     def factory_parse(self, data: Any) -> GLiNER25Input:

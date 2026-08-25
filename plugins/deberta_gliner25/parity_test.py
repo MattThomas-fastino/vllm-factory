@@ -86,15 +86,11 @@ def phase_prepare(
     head_keys = [
         k
         for k in state
-        if k.startswith(
-            ("boundary_head.", "record_decoder.", "relation_scorer.", "classifier.")
-        )
+        if k.startswith(("boundary_head.", "record_decoder.", "relation_scorer.", "classifier."))
     ]
     print(f"Head tensors: {len(head_keys)}")
     if len(head_keys) != EXPECTED_HEAD_TENSORS:
-        raise SystemExit(
-            f"Expected {EXPECTED_HEAD_TENSORS} head tensors, got {len(head_keys)}"
-        )
+        raise SystemExit(f"Expected {EXPECTED_HEAD_TENSORS} head tensors, got {len(head_keys)}")
 
     os.makedirs(os.path.dirname(ref_file) or ".", exist_ok=True)
     with open(ref_file, "w") as f:
@@ -115,12 +111,12 @@ def phase_test(
     from vllm.inputs import TokensPrompt
     from vllm.pooling_params import PoolingParams
 
+    from plugins.deberta_gliner2.processor import format_results, normalize_gliner2_schema
     from plugins.deberta_gliner25.processor import (
         decode_boundary_output,
         preprocess_boundary,
         reshape_boundary_output,
     )
-    from plugins.deberta_gliner2.processor import format_results, normalize_gliner2_schema
 
     print("=" * 60)
     print(f"PHASE 2: vLLM inference + parity ({model_name})")
@@ -163,9 +159,7 @@ def phase_test(
     raw = outputs[0].outputs.data
     decoded = decode_boundary_output(raw, schema)
     formatted = format_results(
-        reshape_boundary_output(decoded)
-        if "entities" not in decoded
-        else decoded,
+        reshape_boundary_output(decoded) if "entities" not in decoded else decoded,
         threshold=THRESHOLD,
         include_confidence=True,
         include_spans=True,

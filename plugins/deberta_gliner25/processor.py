@@ -6,7 +6,7 @@ from typing import Any
 
 import torch
 
-from plugins.deberta_gliner2.processor import decode_output, normalize_gliner2_schema
+from plugins.deberta_gliner2.processor import decode_output
 from vllm_factory.optional_deps import require
 
 

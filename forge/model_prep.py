@@ -341,9 +341,7 @@ def prepare_gliner25_model(
         "num_hidden_layers": 0,
         "num_attention_heads": 1,
         "hidden_size": encoder_cfg.get("hidden_size", 768),
-        "encoder_model_name": extractor_cfg.get(
-            "model_name", "microsoft/mdeberta-v3-base"
-        ),
+        "encoder_model_name": extractor_cfg.get("model_name", "microsoft/mdeberta-v3-base"),
         "vocab_size": len(tokenizer),
         "encoder_hidden_size": encoder_cfg.get("hidden_size", 768),
         "encoder_num_hidden_layers": encoder_cfg.get("num_hidden_layers", 12),
@@ -352,9 +350,7 @@ def prepare_gliner25_model(
         "encoder_hidden_act": encoder_cfg.get("hidden_act", "gelu"),
         "encoder_hidden_dropout_prob": 0.0,
         "encoder_attention_probs_dropout_prob": 0.0,
-        "encoder_max_position_embeddings": encoder_cfg.get(
-            "max_position_embeddings", 512
-        ),
+        "encoder_max_position_embeddings": encoder_cfg.get("max_position_embeddings", 512),
         "encoder_type_vocab_size": encoder_cfg.get("type_vocab_size", 0),
         "encoder_layer_norm_eps": encoder_cfg.get("layer_norm_eps", 1e-7),
         "encoder_relative_attention": encoder_cfg.get("relative_attention", True),
@@ -363,9 +359,7 @@ def prepare_gliner25_model(
         "encoder_pos_att_type": encoder_cfg.get("pos_att_type", ["p2c", "c2p"]),
         "encoder_share_att_key": encoder_cfg.get("share_att_key", True),
         "encoder_norm_rel_ebd": encoder_cfg.get("norm_rel_ebd", "layer_norm"),
-        "encoder_position_biased_input": encoder_cfg.get(
-            "position_biased_input", False
-        ),
+        "encoder_position_biased_input": encoder_cfg.get("position_biased_input", False),
         "encoder_pad_token_id": encoder_cfg.get("pad_token_id", 0),
         "token_pooling": extractor_cfg.get("token_pooling", "first"),
         "boundary_head": extractor_cfg.get("boundary_head") or {},
