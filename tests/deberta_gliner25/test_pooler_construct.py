@@ -8,14 +8,19 @@ never imports ColBERT.
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import types
 from pathlib import Path
 
 import pytest
 
-_GLINER2_ROOT = Path("/Users/matthewthomas/Documents/GLiNER2")
-if _GLINER2_ROOT.exists() and str(_GLINER2_ROOT) not in sys.path:
+# Pick up a source checkout when gliner2 is not installed: $GLINER2_SRC, else a
+# sibling clone of this repo.
+_GLINER2_ROOT = Path(
+    os.environ.get("GLINER2_SRC") or Path(__file__).resolve().parents[3] / "GLiNER2"
+)
+if _GLINER2_ROOT.is_dir() and str(_GLINER2_ROOT) not in sys.path:
     sys.path.insert(0, str(_GLINER2_ROOT))
 
 pytest.importorskip("gliner2", reason="boundary pooler construct needs gliner2")

@@ -56,6 +56,81 @@ SCHEMA = {
 
 THRESHOLD = 0.5
 EXPECTED_HEAD_TENSORS = 334
+# bf16 on the vLLM path against fp32 eager in AutoExtractor.
+CONFIDENCE_TOLERANCE = 0.05
+
+
+def _entity_spans(payload: dict) -> dict[str, list[tuple]]:
+    """Map each entity type to its extracted ``(text, start, end)`` spans."""
+    spans: dict[str, list[tuple]] = {}
+    for label, records in (payload.get("entities") or {}).items():
+        found = []
+        for record in records:
+            if isinstance(record, dict):
+                found.append((record.get("text"), record.get("start"), record.get("end")))
+            else:
+                found.append((record, None, None))
+        spans[label] = found
+    return spans
+
+
+def _entity_confidences(payload: dict) -> dict[tuple, float]:
+    """Map each ``(type, text)`` to its confidence, where one was returned."""
+    scores: dict[tuple, float] = {}
+    for label, records in (payload.get("entities") or {}).items():
+        for record in records:
+            if isinstance(record, dict) and "confidence" in record:
+                scores[label, record.get("text")] = float(record["confidence"])
+    return scores
+
+
+def _classifications(payload: dict) -> dict[str, str]:
+    """Map each classification task to its winning label."""
+    picked: dict[str, str] = {}
+    for key, value in payload.items():
+        if isinstance(value, dict) and "label" in value:
+            picked[key] = str(value["label"])
+        elif isinstance(value, str) and key != "text":
+            picked[key] = value
+    return picked
+
+
+def compare_outputs(
+    reference: dict, candidate: dict, *, tolerance: float = CONFIDENCE_TOLERANCE
+) -> list[str]:
+    """Diff a vLLM result against the AutoExtractor reference.
+
+    Args:
+        reference: Formatted AutoExtractor output.
+        candidate: Formatted vLLM output for the same text and schema.
+        tolerance: Largest confidence difference treated as agreement.
+
+    Returns:
+        One human-readable line per disagreement; empty means parity.
+    """
+    problems: list[str] = []
+    ref_spans, got_spans = _entity_spans(reference), _entity_spans(candidate)
+    for label in sorted(set(ref_spans) | set(got_spans)):
+        expected, actual = ref_spans.get(label, []), got_spans.get(label, [])
+        if expected != actual:
+            problems.append(f"entities[{label}]: expected {expected}, got {actual}")
+
+    ref_scores, got_scores = _entity_confidences(reference), _entity_confidences(candidate)
+    for key in sorted(set(ref_scores) & set(got_scores)):
+        delta = abs(ref_scores[key] - got_scores[key])
+        if delta > tolerance:
+            problems.append(
+                f"confidence{list(key)}: {ref_scores[key]:.4f} vs "
+                f"{got_scores[key]:.4f} (delta {delta:.4f} > {tolerance})"
+            )
+
+    ref_cls, got_cls = _classifications(reference), _classifications(candidate)
+    for task in sorted(set(ref_cls) | set(got_cls)):
+        if ref_cls.get(task) != got_cls.get(task):
+            problems.append(
+                f"classification[{task}]: expected {ref_cls.get(task)!r}, got {got_cls.get(task)!r}"
+            )
+    return problems
 
 
 def phase_prepare(
@@ -167,13 +242,11 @@ def phase_test(
     print(json.dumps(formatted, indent=2, default=str)[:4000])
     print(f"Latency: {latency:.1f}ms")
 
-    ref_entities = (ref.get("output") or {}).get("entities") or {}
-    vllm_entities = formatted.get("entities") or {}
-    print(f"Reference entity types: {sorted(ref_entities)}")
-    print(f"vLLM entity types: {sorted(vllm_entities)}")
-    ok = bool(vllm_entities) or not bool(ref_entities)
-    print("PASS" if ok else "FAIL")
-    return ok
+    problems = compare_outputs(ref.get("output") or {}, formatted)
+    for problem in problems:
+        print(f"  MISMATCH {problem}")
+    print("PASS" if not problems else f"FAIL ({len(problems)} mismatch(es))")
+    return not problems
 
 
 def main() -> None:

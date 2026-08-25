@@ -153,13 +153,27 @@ class GLiNER25BoundaryPooler(nn.Module):
         hidden_states: torch.Tensor,
         ctx: PoolerContext,
     ) -> list[torch.Tensor | None]:
+        """Decode every sequence in one scheduled batch.
+
+        Args:
+            hidden_states: Concatenated encoder output for the whole batch.
+            ctx: Scheduled batch context — sequence lengths and per-prompt
+                extras, in the same order.
+
+        Returns:
+            One packed JSON payload per scheduled sequence. The count is the
+            contract: a batch holds several callers, so returning fewer pairs
+            results with the wrong requests.
+        """
+        extras = list(ctx.extra_kwargs)
+        device = hidden_states.device
         try:
             sequences = split_hidden_states(hidden_states, ctx.seq_lengths)
-        except Exception:
-            dummy = torch.zeros(4, device=hidden_states.device, dtype=hidden_states.dtype)
-            return [dummy]
+        except (IndexError, TypeError, RuntimeError):
+            logger.exception("[GLiNER25] cannot split hidden states; returning empty")
+            return _empty_payloads(len(extras) or 1, device)
 
-        extras = list(ctx.extra_kwargs)[: len(sequences)]
+        extras = extras[: len(sequences)]
         extras.extend({} for _ in range(len(sequences) - len(extras)))
         if _can_batch_compact(extras):
             return self._process_batch(sequences, extras)
@@ -167,7 +181,7 @@ class GLiNER25BoundaryPooler(nn.Module):
         outputs: list[torch.Tensor | None] = []
         for token_embs, extra in zip(sequences, extras, strict=True):
             if not extra:
-                outputs.append(torch.zeros(4, device=token_embs.device, dtype=torch.float32))
+                outputs.append(_pack_json({}, token_embs.device))
                 continue
             outputs.append(self._process_one(token_embs, extra))
         return outputs
@@ -394,3 +408,8 @@ def _pack_json(sample: dict[str, Any], device: torch.device) -> torch.Tensor:
     payload = json.dumps(sample, default=str).encode("utf-8")
     values = [float(len(payload)), *[float(byte) for byte in payload]]
     return torch.tensor(values, device=device, dtype=torch.float32)
+
+
+def _empty_payloads(count: int, device: torch.device) -> list[torch.Tensor | None]:
+    """``count`` decodable empty results, one per sequence in the batch."""
+    return [_pack_json({}, device) for _ in range(count)]
