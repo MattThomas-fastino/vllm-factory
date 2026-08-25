@@ -9,14 +9,16 @@ delegated to ``BoundaryExtractor._extract_from_batch``.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import fields
-from types import SimpleNamespace
 from typing import Any
 
 import torch
 import torch.nn as nn
 
 from vllm_factory.pooling.protocol import PoolerContext, split_hidden_states
+
+logger = logging.getLogger(__name__)
 
 
 def _require(module: str, purpose: str):
@@ -25,10 +27,47 @@ def _require(module: str, purpose: str):
     return require(module, "gliner2", purpose=purpose)
 
 
+def _decode_key(extra: dict[str, Any]) -> tuple[bool, bool, float, int]:
+    """Settings that must match for sequences to decode in one collate."""
+    return (
+        bool(extra.get("include_confidence", False)),
+        bool(extra.get("include_spans", False)),
+        float(extra.get("threshold", 0.5)),
+        int(extra.get("max_len") or 0),
+    )
+
+
+def _can_batch_compact(extras: list[dict[str, Any]]) -> bool:
+    """True when every extra is compact and shares one decode key.
+
+    Args:
+        extras: Per-sequence extras in scheduled order.
+
+    Returns:
+        Whether the batch can be re-collated in one call. ``_extract_from_batch``
+        takes a single threshold and flag set, and the word cap has to match or
+        the re-collated rows would not line up with the encoded tokens.
+    """
+    if not extras or any(not extra for extra in extras):
+        return False
+    from plugins.deberta_gliner25.processor import is_compact_extra
+
+    if not all(is_compact_extra(extra) for extra in extras):
+        return False
+    first = _decode_key(extras[0])
+    return all(_decode_key(extra) == first for extra in extras)
+
+
 class GLiNER25BoundaryPooler(nn.Module):
     """Boundary heads + serving split/pack. Does not subclass gliner2 types."""
 
-    def __init__(self, hidden_size: int, boundary_head: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        hidden_size: int,
+        boundary_head: dict[str, Any] | None = None,
+        tokenizer_name: str | None = None,
+        max_model_len: int | None = None,
+    ):
         super().__init__()
         cfg = dict(boundary_head or {})
         layers = _require("gliner2.layers", "GLiNER25 classifier")
@@ -45,6 +84,10 @@ class GLiNER25BoundaryPooler(nn.Module):
         self.hidden_size = hidden_size
         self.enable_records = bool(self.boundary_settings.enable_records)
         self.enable_relations = bool(self.boundary_settings.enable_relations)
+        self._tokenizer_name = tokenizer_name
+        self._max_model_len = max_model_len
+        self._tokenizer = None
+        self._transformer = None
 
         self.classifier = layers.create_mlp(
             input_dim=hidden_size,
@@ -86,6 +129,22 @@ class GLiNER25BoundaryPooler(nn.Module):
                 use_biaffine_content=self.boundary_settings.relation_biaffine_content,
             )
 
+    def _get_transformer(self) -> Any:
+        if self._transformer is None:
+            if not self._tokenizer_name:
+                raise RuntimeError(
+                    "GLiNER25 pooler has no tokenizer_name; cannot reconstruct compact extras"
+                )
+            from transformers import AutoTokenizer
+
+            from plugins.deberta_gliner25.processor import boundary_transformer
+
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                self._tokenizer_name, use_fast=True, trust_remote_code=True
+            )
+            self._transformer = boundary_transformer(self._tokenizer)
+        return self._transformer
+
     def get_tasks(self) -> set[str]:
         return {"embed", "classify", "plugin"}
 
@@ -100,23 +159,93 @@ class GLiNER25BoundaryPooler(nn.Module):
             dummy = torch.zeros(4, device=hidden_states.device, dtype=hidden_states.dtype)
             return [dummy]
 
+        extras = list(ctx.extra_kwargs)[: len(sequences)]
+        extras.extend({} for _ in range(len(sequences) - len(extras)))
+        if _can_batch_compact(extras):
+            return self._process_batch(sequences, extras)
+
         outputs: list[torch.Tensor | None] = []
-        for i, token_embs in enumerate(sequences):
-            extra = ctx.extra_kwargs[i] if i < len(ctx.extra_kwargs) else {}
+        for token_embs, extra in zip(sequences, extras, strict=True):
             if not extra:
                 outputs.append(torch.zeros(4, device=token_embs.device, dtype=torch.float32))
                 continue
             outputs.append(self._process_one(token_embs, extra))
         return outputs
 
+    def _process_batch(
+        self,
+        sequences: list[torch.Tensor],
+        extras: list[dict[str, Any]],
+    ) -> list[torch.Tensor | None]:
+        """Decode a whole scheduled batch through one collate and one head pass.
+
+        Args:
+            sequences: Per-sequence hidden states, in scheduled order.
+            extras: Compact extras sharing one decode key, same order.
+
+        Returns:
+            One packed JSON payload per sequence. Falls back to per-sequence
+            decode if the re-collated rows do not match the encoded lengths,
+            which would otherwise gather the wrong words.
+        """
+        device = sequences[0].device
+        dtype = sequences[0].dtype
+        batch = self._collate_compact(extras).to(device, dtype=dtype)
+        orig_lens = [int(x) for x in (getattr(batch, "original_lengths", None) or [])]
+        seq_lens = [int(seq.shape[0]) for seq in sequences]
+        if orig_lens and orig_lens != seq_lens:
+            logger.warning(
+                "[GLiNER25] collate lengths %s != encoder lengths %s; per-seq fallback",
+                orig_lens,
+                seq_lens,
+            )
+            return [self._process_one(seq, extra) for seq, extra in zip(sequences, extras)]
+        max_t = max(seq_lens)
+        padded = sequences[0].new_zeros(len(sequences), max_t, sequences[0].shape[-1])
+        for i, seq in enumerate(sequences):
+            padded[i, : seq.shape[0]] = seq
+        core = self._core_from_hidden(padded, batch)
+        host = self._decode_host(core)
+        threshold = float(extras[0].get("threshold", 0.5))
+        include_confidence = bool(extras[0].get("include_confidence", False))
+        include_spans = bool(extras[0].get("include_spans", False))
+        metadata = [{} for _ in extras]
+        samples = host._extract_from_batch(
+            batch, threshold, metadata, include_confidence, include_spans
+        )
+        return [_pack_json(sample if sample else {}, device) for sample in samples]
+
+    def _collate_compact(self, extras: list[dict[str, Any]]) -> Any:
+        from plugins.deberta_gliner25.processor import collate_compact_extras
+
+        return collate_compact_extras(self._tokenizer, extras, transformer=self._get_transformer())
+
     def _process_one(self, token_embs: torch.Tensor, extra: dict[str, Any]) -> torch.Tensor:
-        batch = _batch_from_extra(extra, token_embs.device)
+        """Decode one sequence.
+
+        Args:
+            token_embs: Hidden states for this sequence, shape (tokens, hidden).
+            extra: This sequence's compact extras.
+
+        Returns:
+            The packed JSON payload for this sequence.
+
+        Raises:
+            ValueError: ``extra`` is not compact, which means the sequence was
+                handed the whole request's ``_per_seq`` payload instead of its
+                own slice.
+        """
+        from plugins.deberta_gliner25.processor import is_compact_extra
+
+        if not is_compact_extra(extra):
+            raise ValueError(f"expected compact extra_kwargs, got keys {sorted(extra)[:8]}")
+        batch = self._collate_compact([extra]).to(token_embs.device, dtype=token_embs.dtype)
         core = self._core_from_hidden(token_embs.unsqueeze(0), batch)
         host = self._decode_host(core)
         samples = host._extract_from_batch(
             batch,
             float(extra.get("threshold", 0.5)),
-            extra.get("metadata_list") or [{}],
+            [{}],
             bool(extra.get("include_confidence", False)),
             bool(extra.get("include_spans", False)),
         )
@@ -259,68 +388,6 @@ class GLiNER25BoundaryPooler(nn.Module):
             "rel_specs": rel_specs,
             "word_offsets": word_offsets,
         }
-
-
-def _as_tensor(value: Any, device: torch.device, dtype: torch.dtype | None = None) -> torch.Tensor:
-    if isinstance(value, torch.Tensor):
-        tensor = value.to(device)
-    else:
-        tensor = torch.tensor(value, device=device)
-    if dtype is not None:
-        tensor = tensor.to(dtype)
-    return tensor
-
-
-def _batch_from_extra(extra: dict[str, Any], device: torch.device) -> SimpleNamespace:
-    batch = SimpleNamespace()
-    batch.input_ids = _as_tensor(extra["input_ids"], device, torch.long).unsqueeze(0)
-    batch.text_word_indices = _as_tensor(extra["text_word_indices"], device, torch.long).unsqueeze(0)
-    batch.text_word_mask = _as_tensor(extra["text_word_mask"], device, torch.bool).unsqueeze(0)
-    batch.query_marker_indices = _as_tensor(
-        extra["query_marker_indices"], device, torch.long
-    ).unsqueeze(0)
-    batch.query_marker_mask = _as_tensor(
-        extra["query_marker_mask"], device, torch.bool
-    ).unsqueeze(0)
-    batch.cls_marker_indices = _as_tensor(
-        extra["cls_marker_indices"], device, torch.long
-    ).unsqueeze(0)
-    batch.cls_marker_mask = _as_tensor(extra["cls_marker_mask"], device, torch.bool).unsqueeze(0)
-    batch.start_mappings = extra.get("start_mappings") or [[]]
-    batch.end_mappings = extra.get("end_mappings") or [[]]
-    batch.original_texts = extra.get("original_texts") or [""]
-    batch.original_schemas = extra.get("original_schemas") or [{}]
-    batch.task_types = extra.get("task_types") or [[]]
-    batch.schema_counts = extra.get("schema_counts") or [0]
-    batch.schema_tokens_list = extra.get("schema_tokens_list") or [[]]
-    batch.schema_special_indices = extra.get("schema_special_indices") or [[]]
-    batch.text_word_counts = extra.get("text_word_counts") or [0]
-    batch.record_specs = extra.get("record_specs") or ()
-    batch.query_layouts = [_layout_from_payload(item) for item in extra.get("query_layouts") or [{}]]
-    batch.n = 1
-    batch.__len__ = lambda: 1  # type: ignore[method-assign]
-    return _LenOne(batch)
-
-
-class _LenOne:
-    def __init__(self, inner: SimpleNamespace) -> None:
-        self.__dict__.update(inner.__dict__)
-
-    def __len__(self) -> int:
-        return 1
-
-    def to(self, device: torch.device) -> _LenOne:
-        return self
-
-
-def _layout_from_payload(payload: Any) -> SimpleNamespace:
-    queries = []
-    for spec in payload.get("queries") if isinstance(payload, dict) else getattr(payload, "queries", ()):
-        if isinstance(spec, dict):
-            queries.append(SimpleNamespace(**spec))
-        else:
-            queries.append(spec)
-    return SimpleNamespace(queries=queries)
 
 
 def _pack_json(sample: dict[str, Any], device: torch.device) -> torch.Tensor:

@@ -21,6 +21,7 @@ from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm_factory.pooling.vllm_adapter import VllmPoolerAdapter
 
 from .config import GLiNER25Config
+from .packing import pad_batch, sequence_lengths
 
 logger = logging.getLogger(__name__)
 
@@ -91,12 +92,15 @@ class GLiNER25VLLMModel(nn.Module, SupportsLoRA):
             pad_token_id=cfg.encoder_pad_token_id,
         )
         self.encoder = DebertaV2EncoderModel(config=encoder_cfg)
+        self._encoder_pad_id = int(cfg.encoder_pad_token_id or 0)
 
         from poolers.gliner25 import GLiNER25BoundaryPooler
 
         self._business_pooler = GLiNER25BoundaryPooler(
             hidden_size=cfg.encoder_hidden_size,
             boundary_head=cfg.boundary_head,
+            tokenizer_name=vllm_config.model_config.model,
+            max_model_len=getattr(vllm_config.model_config, "max_model_len", None),
         )
         self.pooler = VllmPoolerAdapter(self._business_pooler, requires_token_ids=True)
 
@@ -119,11 +123,42 @@ class GLiNER25VLLMModel(nn.Module, SupportsLoRA):
         inputs_embeds=None,
         **kwargs,
     ) -> torch.Tensor:
+        """Run the encoder over the scheduled batch and return flat hidden states.
+
+        vLLM hands a single flat token tensor holding every scheduled sequence
+        end to end. Feeding that straight to a bidirectional encoder would let
+        the sequences attend to each other, so it is reshaped into one padded
+        row per sequence before the forward and flattened back afterwards.
+
+        Args:
+            input_ids: Flat token ids for the whole batch, shape (total_tokens,).
+            positions: Per-sequence position ids, restarting at 0 each sequence.
+            intermediate_tensors: Unused; present for the vLLM model contract.
+            inputs_embeds: Unused; embeddings are taken from ``input_ids``.
+            **kwargs: Unused extras passed by the runner.
+
+        Returns:
+            Hidden states of shape (total_tokens, hidden_size), in the same
+            token order as ``input_ids``.
+        """
+        flat = input_ids.view(-1) if input_ids.dim() > 1 else input_ids
+        lengths = sequence_lengths(flat, positions)
+
         with torch.no_grad():
-            hs = self.encoder(input_ids=input_ids)
-        if hs.dim() == 3:
-            hs = hs.squeeze(0)
-        return hs
+            if len(lengths) == 1:
+                hs = self.encoder(input_ids=flat[: lengths[0]].unsqueeze(0))
+            else:
+                ids, mask = pad_batch(flat, lengths, self._encoder_pad_id)
+                hs = self.encoder(input_ids=ids, attention_mask=mask)
+
+        packed = torch.cat([hs[row, :length] for row, length in enumerate(lengths)], dim=0)
+        # The runner pads the token count; give back a row per slot it sent.
+        total = int(flat.numel())
+        if packed.shape[0] == total:
+            return packed
+        out = packed.new_zeros((total, packed.shape[1]))
+        out[: packed.shape[0]] = packed
+        return out
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         """Load encoder.* via the DeBERTa encoder; remaining prefixes into the pooler."""
