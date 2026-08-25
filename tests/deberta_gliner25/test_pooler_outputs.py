@@ -1,55 +1,16 @@
 """The pooler's output list must stay paired with the scheduled batch.
 
 A coalesced batch holds several callers, so returning the wrong number of
-payloads hands one caller another's extraction. Loads poolers/gliner25.py by
-file path with vLLM stubbed, like the construct test.
+payloads hands one caller another's extraction.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import sys
-import types
-from pathlib import Path
+from types import ModuleType
 
 import torch
-
-_ROOT = Path(__file__).resolve().parents[2]
-
-for _pkg in [
-    "vllm",
-    "vllm.config",
-    "vllm_factory",
-    "vllm_factory.pooling",
-    "vllm_factory.pooling.protocol",
-    "vllm_factory.pooling.vllm_adapter",
-]:
-    if _pkg not in sys.modules:
-        _mod = types.ModuleType(_pkg)
-        _mod.__path__ = []
-        sys.modules[_pkg] = _mod
-
-_protocol = sys.modules["vllm_factory.pooling.protocol"]
-if not hasattr(_protocol, "PoolerContext"):
-    _protocol.PoolerContext = type("PoolerContext", (), {})
-if not hasattr(_protocol, "split_hidden_states"):
-    _protocol.split_hidden_states = lambda *a, **kw: None
-
-_opt = "vllm_factory.optional_deps"
-if _opt not in sys.modules or not hasattr(sys.modules[_opt], "require"):
-    _spec = importlib.util.spec_from_file_location(
-        _opt, _ROOT / "vllm_factory" / "optional_deps.py"
-    )
-    _module = importlib.util.module_from_spec(_spec)
-    sys.modules[_opt] = _module
-    _spec.loader.exec_module(_module)
-
-_spec = importlib.util.spec_from_file_location(
-    "gliner25_pooler_outputs", str(_ROOT / "poolers" / "gliner25.py")
-)
-pooler_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(pooler_mod)
 
 
 def _decode(payload: torch.Tensor) -> dict:
@@ -68,17 +29,25 @@ class _Ctx:
         self.prompt_token_ids: list[list[int]] = []
 
 
-def test_empty_payload_decodes_as_an_empty_result():
+def test_loading_the_pooler_leaves_no_stub_behind(pooler_mod: ModuleType):
+    """A leaked stub shadows the real adapter for every later test."""
+    adapter = sys.modules.get("vllm_factory.pooling.vllm_adapter")
+    assert adapter is None or hasattr(adapter, "VllmPoolerAdapter")
+    assert pooler_mod.GLiNER25BoundaryPooler is not None
+
+
+def test_empty_payload_decodes_as_an_empty_result(pooler_mod: ModuleType):
     assert _decode(pooler_mod._pack_json({}, torch.device("cpu"))) == {}
 
 
-def test_empty_payloads_are_one_per_sequence():
+def test_empty_payloads_are_one_per_sequence(pooler_mod: ModuleType):
     payloads = pooler_mod._empty_payloads(3, torch.device("cpu"))
+
     assert len(payloads) == 3
-    assert all(_decode(p) == {} for p in payloads)
+    assert all(_decode(payload) == {} for payload in payloads)
 
 
-def test_split_failure_still_answers_every_sequence(monkeypatch):
+def test_split_failure_still_answers_every_sequence(pooler_mod: ModuleType, monkeypatch):
     def _boom(hidden_states, seq_lengths):
         raise RuntimeError("bad lengths")
 
@@ -92,7 +61,9 @@ def test_split_failure_still_answers_every_sequence(monkeypatch):
     assert all(_decode(payload) == {} for payload in outputs)
 
 
-def test_missing_extras_do_not_shift_the_other_results(monkeypatch):
+def test_missing_extras_do_not_shift_the_other_results(
+    pooler_mod: ModuleType, monkeypatch
+):
     monkeypatch.setattr(
         pooler_mod,
         "split_hidden_states",
