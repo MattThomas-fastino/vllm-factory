@@ -1,36 +1,74 @@
-"""Pioneer response-key mapping for the boundary plugin."""
+"""Boundary decode formats through gliner2, not a four-key Pioneer grouping."""
 
-from plugins.deberta_gliner25.processor import reshape_boundary_output
+import json
+from pathlib import Path
+
+from gliner2.inference.runtime import format_results
+
+from plugins.deberta_gliner25.processor import schema_format_args
 
 
-def test_reshape_maps_entities_classifications_structures_relations():
-    sample = {
-        "entities": {"person": [{"text": "Ada", "start": 0, "end": 3}]},
-        "sentiment": "positive",
-        "employee": [{"name": "Ada", "title": "VP"}],
-        "works_at": [{"head": "Ada", "tail": "NVIDIA"}],
+def test_format_results_merges_entity_list_of_dicts():
+    decoded = {
+        "entities": [
+            {"person": [{"text": "Ada", "start": 0, "end": 3, "confidence": 0.9}]}
+        ]
     }
-    out = reshape_boundary_output(sample)
+    out = format_results(decoded, include_confidence=True)
     assert out["entities"]["person"][0]["text"] == "Ada"
-    assert out["classifications"]["sentiment"] == "positive"
-    assert out["structures"]["employee"][0]["name"] == "Ada"
-    assert out["relations"]["works_at"][0]["head"] == "Ada"
+    assert "classifications" not in out
+    assert "structures" not in out
+    assert "relations" not in out
 
 
-def test_reshape_merges_list_of_entity_dicts():
-    sample = {
-        "entities": [{"person": [{"text": "Ada"}]}, {"org": [{"text": "NVIDIA"}]}],
-    }
-    out = reshape_boundary_output(sample)
-    assert "person" in out["entities"]
-    assert "org" in out["entities"]
+def test_schema_format_args_reads_tasks_and_relations():
+    rels, tasks = schema_format_args(
+        {
+            "classifications": [{"task": "topic", "labels": ["a"]}],
+            "relations": {"works_at": "", "located_in": ""},
+        }
+    )
+    assert tasks == ["topic"]
+    assert rels == ["works_at", "located_in"]
 
 
-def test_reshape_empty_sample():
-    out = reshape_boundary_output({})
-    assert out == {
+def test_format_results_accepts_json_decoded_classification_pair():
+    out = format_results(
+        {"topic": ["finance", 0.79]},
+        include_confidence=True,
+        classification_tasks=["topic"],
+    )
+    assert out["topic"] == {"label": "finance", "confidence": 0.79}
+
+
+def test_format_results_lifts_classification_from_schema_tasks():
+    decoded = {
         "entities": {},
-        "classifications": {},
-        "structures": {},
-        "relations": {},
+        "topic": ("technology", 0.8),
     }
+    out = format_results(
+        decoded,
+        include_confidence=True,
+        classification_tasks=["topic"],
+    )
+    assert out["topic"] == {"label": "technology", "confidence": 0.8}
+
+
+def test_saved_pooling_payload_formats_to_entity_dict():
+    fixture = Path(__file__).parent / "fixtures" / "raw_pooling.json"
+    decoded = json.loads(fixture.read_text())
+    assert isinstance(decoded["entities"], list)
+    out = format_results(decoded, include_confidence=True)
+    assert isinstance(out["entities"], dict)
+    assert out["entities"]["person"][0]["text"] == "John Smith"
+    assert "classifications" not in out or out["classifications"] == {}
+    decoded = {
+        "entities": {},
+        "topic": ("technology", 0.8),
+    }
+    out = format_results(
+        decoded,
+        include_confidence=True,
+        classification_tasks=["topic"],
+    )
+    assert out["topic"] == {"label": "technology", "confidence": 0.8}

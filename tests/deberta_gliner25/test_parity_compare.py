@@ -92,3 +92,17 @@ def test_bare_string_records_compare_by_text():
 
     assert compare_outputs(reference, {"entities": {"person": ["John Smith"]}}) == []
     assert compare_outputs(reference, {"entities": {"person": ["Jane Doe"]}})
+
+
+def test_four_key_grouping_is_a_payload_mismatch():
+    formatted = {"entities": {"person": [_JOHN]}}
+    grouped = {
+        "entities": {"person": [_JOHN]},
+        "classifications": {},
+        "structures": {},
+        "relations": {},
+    }
+
+    problems = compare_outputs(formatted, grouped)
+
+    assert any(problem.startswith("keys:") for problem in problems)

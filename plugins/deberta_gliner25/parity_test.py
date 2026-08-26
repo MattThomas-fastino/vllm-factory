@@ -67,7 +67,9 @@ def _entity_spans(payload: dict) -> dict[str, list[tuple]]:
         found = []
         for record in records:
             if isinstance(record, dict):
-                found.append((record.get("text"), record.get("start"), record.get("end")))
+                found.append(
+                    (record.get("text"), record.get("start"), record.get("end"))
+                )
             else:
                 found.append((record, None, None))
         spans[label] = found
@@ -115,7 +117,10 @@ def compare_outputs(
         if expected != actual:
             problems.append(f"entities[{label}]: expected {expected}, got {actual}")
 
-    ref_scores, got_scores = _entity_confidences(reference), _entity_confidences(candidate)
+    ref_scores, got_scores = (
+        _entity_confidences(reference),
+        _entity_confidences(candidate),
+    )
     for key in sorted(set(ref_scores) & set(got_scores)):
         delta = abs(ref_scores[key] - got_scores[key])
         if delta > tolerance:
@@ -130,6 +135,12 @@ def compare_outputs(
             problems.append(
                 f"classification[{task}]: expected {ref_cls.get(task)!r}, got {got_cls.get(task)!r}"
             )
+
+    skip = {"text"}
+    ref_keys = set(reference) - skip
+    got_keys = set(candidate) - skip
+    if ref_keys != got_keys:
+        problems.append(f"keys: expected {sorted(ref_keys)}, got {sorted(got_keys)}")
     return problems
 
 
@@ -161,17 +172,25 @@ def phase_prepare(
     head_keys = [
         k
         for k in state
-        if k.startswith(("boundary_head.", "record_decoder.", "relation_scorer.", "classifier."))
+        if k.startswith(
+            ("boundary_head.", "record_decoder.", "relation_scorer.", "classifier.")
+        )
     ]
     print(f"Head tensors: {len(head_keys)}")
     if len(head_keys) != EXPECTED_HEAD_TENSORS:
-        raise SystemExit(f"Expected {EXPECTED_HEAD_TENSORS} head tensors, got {len(head_keys)}")
+        raise SystemExit(
+            f"Expected {EXPECTED_HEAD_TENSORS} head tensors, got {len(head_keys)}"
+        )
 
     os.makedirs(os.path.dirname(ref_file) or ".", exist_ok=True)
     with open(ref_file, "w") as f:
-        json.dump({"model": model_name, "text": TEXT, "output": reference}, f, default=str)
+        json.dump(
+            {"model": model_name, "text": TEXT, "output": reference}, f, default=str
+        )
 
-    prepared = prepare_gliner25_model(model_name, output_dir=local_model_dir, force=True)
+    prepared = prepare_gliner25_model(
+        model_name, output_dir=local_model_dir, force=True
+    )
     print(f"Prepared model dir: {prepared}")
     print("Phase 1 complete")
 
@@ -186,11 +205,13 @@ def phase_test(
     from vllm.inputs import TokensPrompt
     from vllm.pooling_params import PoolingParams
 
-    from plugins.deberta_gliner2.processor import format_results, normalize_gliner2_schema
+    from gliner2.inference.runtime import format_results as gliner2_format_results
+
+    from plugins.deberta_gliner2.processor import normalize_gliner2_schema
     from plugins.deberta_gliner25.processor import (
         decode_boundary_output,
         preprocess_boundary,
-        reshape_boundary_output,
+        schema_format_args,
     )
 
     print("=" * 60)
@@ -229,15 +250,18 @@ def phase_test(
     n = 5
     t0 = time.perf_counter()
     for _ in range(n):
-        outputs = llm.encode([prompt], pooling_params=pooling_params, pooling_task="plugin")
+        outputs = llm.encode(
+            [prompt], pooling_params=pooling_params, pooling_task="plugin"
+        )
     latency = (time.perf_counter() - t0) / n * 1000
     raw = outputs[0].outputs.data
     decoded = decode_boundary_output(raw, schema)
-    formatted = format_results(
-        reshape_boundary_output(decoded) if "entities" not in decoded else decoded,
-        threshold=THRESHOLD,
+    requested_relations, classification_tasks = schema_format_args(schema)
+    formatted = gliner2_format_results(
+        decoded,
         include_confidence=True,
-        include_spans=True,
+        requested_relations=requested_relations,
+        classification_tasks=classification_tasks,
     )
     print(json.dumps(formatted, indent=2, default=str)[:4000])
     print(f"Latency: {latency:.1f}ms")

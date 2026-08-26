@@ -23,7 +23,9 @@ def boundary_transformer(tokenizer: Any) -> Any:
         A GLiNER2 SchemaTransformer. Construction is cheap but not free, so
         callers that collate per request hold onto the instance.
     """
-    processor_mod = require("gliner2.processor", "gliner2", purpose="GLiNER25 preprocess")
+    processor_mod = require(
+        "gliner2.processor", "gliner2", purpose="GLiNER25 preprocess"
+    )
     return processor_mod.SchemaTransformer(tokenizer=tokenizer, token_pooling="first")
 
 
@@ -193,7 +195,9 @@ def preprocess_boundary(
                 "--max-model-len, or set 'truncate_overflow_text'"
             )
         cap = _tighter_word_cap(batch, len(input_ids), max_model_len)
-    raise ValueError(f"'text' did not fit under {max_model_len} tokens after {_FIT_ATTEMPTS} tries")
+    raise ValueError(
+        f"'text' did not fit under {max_model_len} tokens after {_FIT_ATTEMPTS} tries"
+    )
 
 
 def _tighter_word_cap(batch: Any, tokens: int, budget: int) -> int:
@@ -266,15 +270,34 @@ def _is_relation_payload(value: Any) -> bool:
     return bool(keys & {"head", "tail", "subject", "object", "src", "dst"})
 
 
-def decode_boundary_output(raw_output, schema: dict[str, Any] | None = None) -> dict[str, Any]:
+def decode_boundary_output(
+    raw_output, schema: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Unpack the JSON byte tensor produced by the boundary pooler."""
-    decoded = decode_output(raw_output, schema or {})
-    if any(key in decoded for key in ("entities", "classifications", "structures", "relations")):
-        if "type" not in decoded:
-            return {
-                "entities": decoded.get("entities", {}),
-                "classifications": decoded.get("classifications", {}),
-                "structures": decoded.get("structures", {}),
-                "relations": decoded.get("relations", {}),
-            }
-    return reshape_boundary_output(decoded)
+    return decode_output(raw_output, schema or {})
+
+
+def schema_format_args(schema: dict[str, Any] | None) -> tuple[list[str], list[str]]:
+    """Derive ``requested_relations`` and ``classification_tasks`` from a schema.
+
+    Args:
+        schema: GLiNER2 extract schema, or None.
+
+    Returns:
+        ``(requested_relations, classification_tasks)``.
+    """
+    schema = schema or {}
+    classifications = schema.get("classifications") or []
+    tasks = [
+        item["task"]
+        for item in classifications
+        if isinstance(item, dict) and "task" in item
+    ]
+    relations = schema.get("relations") or {}
+    if isinstance(relations, dict):
+        rels = list(relations)
+    elif isinstance(relations, list):
+        rels = [item if isinstance(item, str) else str(item) for item in relations]
+    else:
+        rels = []
+    return rels, tasks

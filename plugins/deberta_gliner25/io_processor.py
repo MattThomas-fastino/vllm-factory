@@ -11,15 +11,23 @@ from typing import Any, Dict
 from transformers import AutoTokenizer
 from vllm.config import VllmConfig
 
-from plugins.deberta_gliner2.processor import format_results, normalize_gliner2_schema
+from gliner2.inference.runtime import format_results as gliner2_format_results
+
+from plugins.deberta_gliner2.processor import normalize_gliner2_schema
 from plugins.deberta_gliner25.processor import (
     boundary_transformer,
     collate_word_cap,
     decode_boundary_output,
     iter_boundary_items,
     preprocess_boundary,
+    schema_format_args,
 )
-from vllm_factory.io.base import FactoryIOProcessor, PoolingRequestOutput, PromptType, TokensPrompt
+from vllm_factory.io.base import (
+    FactoryIOProcessor,
+    PoolingRequestOutput,
+    PromptType,
+    TokensPrompt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +77,9 @@ class DeBERTaGLiNER25IOProcessor(FactoryIOProcessor):
         if not stripped:
             return None
         if not _ADAPTER_NAME_RE.match(stripped):
-            raise ValueError(f"'adapter' must match ^[A-Za-z0-9_.\\-:/]{{1,128}}$ — got {value!r}")
+            raise ValueError(
+                f"'adapter' must match ^[A-Za-z0-9_.\\-:/]{{1,128}}$ — got {value!r}"
+            )
         return stripped
 
     def _parse_one(self, data: dict[str, Any]) -> GLiNER25Input:
@@ -98,7 +108,9 @@ class DeBERTaGLiNER25IOProcessor(FactoryIOProcessor):
             include_confidence=self._coerce_bool(
                 data.get("include_confidence", False), "include_confidence"
             ),
-            include_spans=self._coerce_bool(data.get("include_spans", False), "include_spans"),
+            include_spans=self._coerce_bool(
+                data.get("include_spans", False), "include_spans"
+            ),
             truncate_overflow_text=self._coerce_bool(
                 data.get("truncate_overflow_text", False), "truncate_overflow_text"
             ),
@@ -218,18 +230,17 @@ class DeBERTaGLiNER25IOProcessor(FactoryIOProcessor):
             if raw is None:
                 results.append({})
                 continue
-            decoded = decode_boundary_output(raw, meta.get("schema_dict") or {})
-            formatted = format_results(
+            schema = meta.get("schema_dict") or {}
+            decoded = decode_boundary_output(raw, schema)
+            requested_relations, classification_tasks = schema_format_args(schema)
+            formatted = gliner2_format_results(
                 decoded,
-                threshold=meta.get("threshold", 0.5),
                 include_confidence=meta.get("include_confidence", False),
-                include_spans=meta.get("include_spans", False),
+                requested_relations=requested_relations,
+                classification_tasks=classification_tasks,
             )
-            if isinstance(formatted, dict):
-                for key in ("entities", "classifications", "structures", "relations"):
-                    formatted.setdefault(key, {} if key != "structures" else {})
-                if meta.get("adapter") is not None:
-                    formatted.setdefault("adapter", meta["adapter"])
+            if isinstance(formatted, dict) and meta.get("adapter") is not None:
+                formatted.setdefault("adapter", meta["adapter"])
             results.append(formatted if isinstance(formatted, dict) else {})
         if len(results) == 1:
             return results[0]
